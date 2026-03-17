@@ -335,6 +335,11 @@ export default function CalorieTracker() {
   const [search, setSearch] = useState("");
   const [profile, setProfile] = useState(DEFAULT_PROFILE);
   const [profileForm, setProfileForm] = useState(DEFAULT_PROFILE);
+  const [coachOpen, setCoachOpen] = useState(false);
+  const [coachMessages, setCoachMessages] = useState([]);
+  const [coachInput, setCoachInput] = useState("");
+  const [coachLoading, setCoachLoading] = useState(false);
+  const [coachWater, setCoachWater] = useState("");
   const t = THEMES[theme];
 
   useEffect(() => {
@@ -382,6 +387,79 @@ export default function CalorieTracker() {
   const removeEntry = (id) => setEntries((prev) => prev.filter((e) => e.id !== id));
   const resetDay = () => setEntries((prev) => prev.filter((e) => e.date !== selectedDate));
   const pct = (val, goal) => Math.min((val / goal) * 100, 100);
+
+  const buildCoachSummary = () => {
+    const g = goals;
+    const goalLabel = GOAL_LABELS[profile.goal] || "Udržení váhy";
+    const computed = calcGoals(profile);
+    const tdee = computed ? computed.tdee : "neznámé";
+    const lines = [`Cíl: ${goalLabel}`, `TDEE: ${tdee} kcal`];
+    lines.push(`Cílové makra: ${g.calories} kcal, ${g.protein}g B, ${g.carbs}g S, ${g.fat}g T`);
+    if (profile.weight) lines.push(`Váha: ${profile.weight} kg`);
+    if (profile.age) lines.push(`Věk: ${profile.age}`);
+    if (profile.gender) lines.push(`Pohlaví: ${profile.gender}`);
+    if (profile.allergies) lines.push(`Alergie: ${profile.allergies}`);
+    lines.push("");
+    lines.push("== Jídla dnes ==");
+    if (todayEntries.length === 0) {
+      lines.push("(žádná jídla)");
+    } else {
+      todayEntries.forEach((e) => {
+        lines.push(`- ${e.name}: ${e.cal} kcal, ${e.p}g B, ${e.c}g S, ${e.f}g T (${e.time})`);
+      });
+    }
+    lines.push("");
+    lines.push(`Celkem: ${totals.calories} kcal, ${totals.protein}g B, ${totals.carbs}g S, ${totals.fat}g T`);
+    lines.push(`Voda: ${coachWater ? coachWater + "l" : "neuvedeno"}`);
+    return lines.join("\n");
+  };
+
+  const sendCoachMessage = async (userText, isAuto = false) => {
+    const newMsg = { role: "user", content: userText };
+    const allMsgs = [...coachMessages, newMsg];
+    if (!isAuto) setCoachMessages(allMsgs);
+    setCoachLoading(true);
+    try {
+      const apiMessages = allMsgs.map((m) => ({ role: m.role, content: m.content }));
+      const res = await fetch("/api/coach", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: apiMessages }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Chyba serveru");
+      const assistantMsg = { role: "assistant", content: data.text };
+      setCoachMessages([...allMsgs, assistantMsg]);
+    } catch (err) {
+      setCoachMessages([...allMsgs, { role: "assistant", content: `❌ ${err.message}` }]);
+    } finally {
+      setCoachLoading(false);
+    }
+  };
+
+  const openCoach = () => {
+    setCoachOpen(true);
+    if (coachMessages.length === 0) {
+      const summary = buildCoachSummary();
+      const autoMsg = { role: "user", content: summary };
+      setCoachMessages([autoMsg]);
+      setCoachLoading(true);
+      fetch("/api/coach", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: [{ role: "user", content: summary }] }),
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.error) throw new Error(data.error);
+          setCoachMessages([autoMsg, { role: "assistant", content: data.text }]);
+        })
+        .catch((err) => {
+          setCoachMessages([autoMsg, { role: "assistant", content: `❌ ${err.message}` }]);
+        })
+        .finally(() => setCoachLoading(false));
+    }
+  };
 
   const weekData = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(); d.setDate(d.getDate() - (6 - i));
@@ -618,6 +696,152 @@ export default function CalorieTracker() {
             </div>
           </div>
         )}
+
+        {/* COACH PANEL */}
+        {coachOpen && (
+          <div style={{
+            position: "fixed", bottom: 80, right: 16, width: 360, maxWidth: "calc(100vw - 32px)",
+            maxHeight: "70vh", background: t.bg, border: `1px solid ${t.cardBorder}`,
+            borderRadius: 20, boxShadow: "0 8px 40px rgba(0,0,0,0.4)", display: "flex",
+            flexDirection: "column", zIndex: 1000, overflow: "hidden",
+          }}>
+            {/* Header */}
+            <div style={{
+              padding: "14px 16px", borderBottom: `1px solid ${t.cardBorder}`,
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              background: t.card,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 22 }}>🤖</span>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: t.text, fontFamily: "'Bebas Neue', sans-serif", letterSpacing: 2 }}>LEVELUP COACH</div>
+                  <div style={{ fontSize: 9, color: t.textFaint, letterSpacing: 1.5, textTransform: "uppercase" }}>AI výživový poradce</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button onClick={() => { setCoachMessages([]); setCoachWater(""); }} style={{
+                  background: t.redBg, border: "none", borderRadius: 8, color: t.red,
+                  padding: "4px 10px", fontSize: 9, fontWeight: 700, cursor: "pointer", letterSpacing: 1,
+                }}>RESET</button>
+                <button onClick={() => setCoachOpen(false)} style={{
+                  background: "none", border: "none", color: t.textMuted, fontSize: 20,
+                  cursor: "pointer", padding: "0 4px", lineHeight: 1,
+                }}>×</button>
+              </div>
+            </div>
+
+            {/* Water input */}
+            {coachMessages.length === 0 && (
+              <div style={{ padding: "12px 16px", borderBottom: `1px solid ${t.cardBorder}`, background: t.card }}>
+                <label style={{ fontSize: 10, fontWeight: 700, color: t.textMuted, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 6, display: "block" }}>
+                  💧 Kolik litrů vody dnes?
+                </label>
+                <input type="number" step="0.1" min="0" max="10" placeholder="např. 2.5" value={coachWater}
+                  onChange={(e) => setCoachWater(e.target.value)}
+                  style={{
+                    width: "100%", padding: "8px 12px", background: t.inputBg, border: `1px solid ${t.inputBorder}`,
+                    borderRadius: 8, color: t.text, fontSize: 13, fontFamily: "'Inter', sans-serif",
+                    outline: "none", boxSizing: "border-box",
+                  }} />
+              </div>
+            )}
+
+            {/* Messages */}
+            <div style={{
+              flex: 1, overflowY: "auto", padding: "12px 16px", display: "flex",
+              flexDirection: "column", gap: 10, minHeight: 120,
+            }}>
+              {coachMessages.length === 0 && (
+                <div style={{ textAlign: "center", padding: "30px 10px", color: t.textGhost }}>
+                  <div style={{ fontSize: 32, marginBottom: 8 }}>🤖</div>
+                  <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+                    Zadej vodu a klikni <strong style={{ color: t.accent }}>ANALYZOVAT</strong>
+                    <br />pro denní rozbor jídelníčku
+                  </div>
+                </div>
+              )}
+              {coachMessages.map((msg, i) => (
+                <div key={i} style={{
+                  alignSelf: msg.role === "user" ? "flex-end" : "flex-start",
+                  maxWidth: "88%",
+                  padding: "10px 14px",
+                  borderRadius: msg.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
+                  background: msg.role === "user" ? t.accentBg : t.card,
+                  border: `1px solid ${msg.role === "user" ? t.accent + "33" : t.cardBorder}`,
+                  fontSize: 12, lineHeight: 1.6, color: t.textSec,
+                  whiteSpace: "pre-wrap", wordBreak: "break-word",
+                }}>
+                  {msg.role === "user" && i === 0 ? "📊 Denní souhrn odeslán" : msg.content}
+                </div>
+              ))}
+              {coachLoading && (
+                <div style={{
+                  alignSelf: "flex-start", padding: "10px 14px", borderRadius: "14px 14px 14px 4px",
+                  background: t.card, border: `1px solid ${t.cardBorder}`, fontSize: 12, color: t.textMuted,
+                }}>
+                  <span style={{ animation: "pulse 1.5s ease-in-out infinite" }}>🤖 Analyzuji...</span>
+                </div>
+              )}
+            </div>
+
+            {/* Input area */}
+            {coachMessages.length === 0 ? (
+              <div style={{ padding: "12px 16px", borderTop: `1px solid ${t.cardBorder}` }}>
+                <button onClick={() => openCoach()} style={{
+                  width: "100%", padding: "12px", background: t.submitBg, border: "none",
+                  borderRadius: 10, color: t.submitText, fontWeight: 800, fontSize: 12,
+                  cursor: "pointer", letterSpacing: 1.5, textTransform: "uppercase",
+                  fontFamily: "'Inter', sans-serif",
+                }}>🤖 ANALYZOVAT DNEŠNÍ DEN</button>
+              </div>
+            ) : (
+              <div style={{
+                padding: "10px 12px", borderTop: `1px solid ${t.cardBorder}`,
+                display: "flex", gap: 8,
+              }}>
+                <input type="text" placeholder="Napiš zprávu..." value={coachInput}
+                  onChange={(e) => setCoachInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && coachInput.trim() && !coachLoading) {
+                      sendCoachMessage(coachInput.trim());
+                      setCoachInput("");
+                    }
+                  }}
+                  style={{
+                    flex: 1, padding: "10px 14px", background: t.inputBg, border: `1px solid ${t.inputBorder}`,
+                    borderRadius: 10, color: t.text, fontSize: 13, fontFamily: "'Inter', sans-serif",
+                    outline: "none",
+                  }} />
+                <button onClick={() => {
+                  if (coachInput.trim() && !coachLoading) {
+                    sendCoachMessage(coachInput.trim());
+                    setCoachInput("");
+                  }
+                }} disabled={!coachInput.trim() || coachLoading} style={{
+                  padding: "10px 16px", background: coachInput.trim() && !coachLoading ? t.submitBg : t.track,
+                  border: "none", borderRadius: 10,
+                  color: coachInput.trim() && !coachLoading ? t.submitText : t.textGhost,
+                  fontWeight: 800, fontSize: 12, cursor: coachInput.trim() && !coachLoading ? "pointer" : "not-allowed",
+                  fontFamily: "'Inter', sans-serif",
+                }}>↑</button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* COACH FLOATING BUTTON */}
+        <button onClick={() => { if (coachOpen) { setCoachOpen(false); } else { setCoachOpen(true); } }}
+          style={{
+            position: "fixed", bottom: 20, right: 20, width: 56, height: 56, borderRadius: 28,
+            background: t.accentGrad, border: "none", cursor: "pointer", fontSize: 24,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: "0 4px 20px rgba(212,175,55,0.3)", zIndex: 999,
+            transition: "transform 0.2s, box-shadow 0.2s",
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.transform = "scale(1.08)"; e.currentTarget.style.boxShadow = "0 6px 28px rgba(212,175,55,0.45)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.transform = "scale(1)"; e.currentTarget.style.boxShadow = "0 4px 20px rgba(212,175,55,0.3)"; }}
+          title="LEVELUP Coach"
+        >{coachOpen ? "✕" : "🤖"}</button>
 
         {/* SETTINGS */}
         {view === "settings" && (() => {
