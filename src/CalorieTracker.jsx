@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
 const DEFAULT_GOALS = { calories: 3000, protein: 150, carbs: 350, fat: 90 };
 
@@ -323,6 +323,40 @@ const THEMES = {
   },
 };
 
+// Monotonic ID — avoids Date.now() collisions when two messages are created in the same ms
+let _msgId = 0;
+const nextMsgId = () => ++_msgId;
+
+// Module-level — stable identity across renders, no re-creation on every keystroke
+const CircularProgress = ({ value, max, size = 140, stroke = 10, color, label, trackColor, textColor, mutedColor }) => {
+  const r = (size - stroke) / 2, c = 2 * Math.PI * r, off = c * (1 - Math.min(value / max, 1));
+  return (
+    <div style={{ position: "relative", width: size, height: size }}>
+      <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={trackColor} strokeWidth={stroke} />
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={stroke}
+          strokeDasharray={c} strokeDashoffset={off} strokeLinecap="round" style={{ transition: "stroke-dashoffset 0.6s ease" }} />
+      </svg>
+      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+        <span style={{ fontSize: size > 100 ? 28 : 18, fontWeight: 800, color: textColor, fontFamily: "'Bebas Neue', sans-serif", letterSpacing: 1 }}>{value}</span>
+        <span style={{ fontSize: 10, color: mutedColor, textTransform: "uppercase", letterSpacing: 1.5 }}>{label}</span>
+      </div>
+    </div>
+  );
+};
+
+const MacroBar = ({ label, value, max, color, trackColor, mutedColor, faintColor }) => (
+  <div style={{ marginBottom: 12 }}>
+    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+      <span style={{ fontSize: 11, fontWeight: 600, color: mutedColor, textTransform: "uppercase", letterSpacing: 1.5 }}>{label}</span>
+      <span style={{ fontSize: 12, fontWeight: 700, color }}>{value}g <span style={{ color: faintColor }}>/ {max}g</span></span>
+    </div>
+    <div style={{ height: 6, background: trackColor, borderRadius: 3, overflow: "hidden" }}>
+      <div style={{ height: "100%", width: `${Math.min((value / max) * 100, 100)}%`, background: color, borderRadius: 3, transition: "width 0.5s ease" }} />
+    </div>
+  </div>
+);
+
 export default function CalorieTracker() {
   const [entries, setEntries] = useState([]);
   const [view, setView] = useState("dashboard");
@@ -340,10 +374,24 @@ export default function CalorieTracker() {
   const [coachInput, setCoachInput] = useState("");
   const [coachLoading, setCoachLoading] = useState(false);
   const [coachWater, setCoachWater] = useState("");
+  const coachAbortRef = useRef(null);
+  const coachBottomRef = useRef(null);
   const t = THEMES[theme];
 
   useEffect(() => {
-    try { const r = localStorage.getItem("calorie-entries"); if (r) setEntries(JSON.parse(r)); } catch (e) {}
+    try {
+      const r = localStorage.getItem("calorie-entries");
+      if (r) {
+        // Deduplicate legacy entries that may share a Date.now() id
+        const loaded = JSON.parse(r);
+        const seen = new Set();
+        setEntries(loaded.map(e => {
+          if (seen.has(e.id)) return { ...e, id: nextMsgId() };
+          seen.add(e.id);
+          return e;
+        }));
+      }
+    } catch (e) {}
     try { const r = localStorage.getItem("calorie-theme"); if (r) setTheme(r); } catch (e) {}
     try {
       const r = localStorage.getItem("calorie-profile");
@@ -377,7 +425,7 @@ export default function CalorieTracker() {
 
   const addEntry = (food) => {
     setEntries((prev) => [...prev, {
-      id: Date.now(), date: selectedDate, name: food.name,
+      id: nextMsgId(), date: selectedDate, name: food.name,
       cal: Number(food.cal), p: Number(food.p), c: Number(food.c), f: Number(food.f),
       time: new Date().toLocaleTimeString("cs-CZ", { hour: "2-digit", minute: "2-digit" }),
     }]);
@@ -392,78 +440,90 @@ export default function CalorieTracker() {
   };
   const pct = (val, goal) => Math.min((val / goal) * 100, 100);
 
-  const buildCoachSummary = () => {
-    const g = goals;
+  const buildCoachSummary = useCallback(() => {
     const goalLabel = GOAL_LABELS[profile.goal] || "Udržení váhy";
-    const computed = calcGoals(profile);
-    const tdee = computed ? computed.tdee : "neznámé";
-    const lines = [`Cíl: ${goalLabel}`, `TDEE: ${tdee} kcal`];
-    lines.push(`Cílové makra: ${g.calories} kcal, ${g.protein}g B, ${g.carbs}g S, ${g.fat}g T`);
+    const tdee = goals.tdee ?? "neznámé"; // goals already computed above, no need to re-call calcGoals
+    const lines = [
+      `Cíl: ${goalLabel}`, `TDEE: ${tdee} kcal`,
+      `Cílové makra: ${goals.calories} kcal, ${goals.protein}g B, ${goals.carbs}g S, ${goals.fat}g T`,
+    ];
     if (profile.weight) lines.push(`Váha: ${profile.weight} kg`);
     if (profile.age) lines.push(`Věk: ${profile.age}`);
     if (profile.gender) lines.push(`Pohlaví: ${profile.gender}`);
     if (profile.allergies) lines.push(`Alergie: ${profile.allergies}`);
-    lines.push("");
-    lines.push("== Jídla dnes ==");
+    lines.push("", "== Jídla dnes ==");
     if (todayEntries.length === 0) {
       lines.push("(žádná jídla)");
     } else {
-      todayEntries.forEach((e) => {
-        lines.push(`- ${e.name}: ${e.cal} kcal, ${e.p}g B, ${e.c}g S, ${e.f}g T (${e.time})`);
-      });
+      todayEntries.forEach((e) => lines.push(`- ${e.name}: ${e.cal} kcal, ${e.p}g B, ${e.c}g S, ${e.f}g T (${e.time})`));
     }
-    lines.push("");
-    lines.push(`Celkem: ${totals.calories} kcal, ${totals.protein}g B, ${totals.carbs}g S, ${totals.fat}g T`);
-    lines.push(`Voda: ${coachWater ? coachWater + "l" : "neuvedeno"}`);
+    lines.push(
+      "",
+      `Celkem: ${totals.calories} kcal, ${totals.protein}g B, ${totals.carbs}g S, ${totals.fat}g T`,
+      `Voda: ${coachWater ? coachWater + "l" : "neuvedeno"}`,
+    );
     return lines.join("\n");
-  };
+  }, [goals, profile, todayEntries, totals, coachWater]);
 
-  const sendCoachMessage = async (userText, isAuto = false) => {
-    const newMsg = { role: "user", content: userText };
+  // Scroll to bottom whenever messages change
+  useEffect(() => {
+    coachBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [coachMessages, coachLoading]);
+
+  // Raw fetch helper — single source of truth for /api/coach calls
+  const _fetchCoach = useCallback(async (messages, signal) => {
+    // Only send real conversation turns (no isError pseudo-messages)
+    const apiMessages = messages
+      .filter((m) => !m.isError)
+      .slice(-20) // cap at 20 turns to bound token usage
+      .map(({ role, content }) => ({ role, content }));
+    const res = await fetch("/api/coach", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: apiMessages }),
+      signal,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Chyba serveru");
+    return data.text;
+  }, []);
+
+  const sendCoachMessage = useCallback(async (userText) => {
+    const newMsg = { id: nextMsgId(), role: "user", content: userText };
     const allMsgs = [...coachMessages, newMsg];
-    if (!isAuto) setCoachMessages(allMsgs);
+    setCoachMessages(allMsgs);
     setCoachLoading(true);
+    const controller = new AbortController();
+    coachAbortRef.current = controller;
     try {
-      const apiMessages = allMsgs.map((m) => ({ role: m.role, content: m.content }));
-      const res = await fetch("/api/coach", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: apiMessages }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Chyba serveru");
-      const assistantMsg = { role: "assistant", content: data.text };
-      setCoachMessages([...allMsgs, assistantMsg]);
+      const text = await _fetchCoach(allMsgs, controller.signal);
+      setCoachMessages([...allMsgs, { id: nextMsgId(), role: "assistant", content: text }]);
     } catch (err) {
-      setCoachMessages([...allMsgs, { role: "assistant", content: `❌ ${err.message}` }]);
+      if (err.name === "AbortError") return;
+      setCoachMessages([...allMsgs, { id: nextMsgId(), role: "assistant", content: err.message, isError: true }]);
     } finally {
       setCoachLoading(false);
     }
-  };
+  }, [coachMessages, _fetchCoach]);
 
-  const openCoach = () => {
+  const openCoach = useCallback(() => {
     setCoachOpen(true);
-    if (coachMessages.length === 0) {
-      const summary = buildCoachSummary();
-      const autoMsg = { role: "user", content: summary };
-      setCoachMessages([autoMsg]);
-      setCoachLoading(true);
-      fetch("/api/coach", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: [{ role: "user", content: summary }] }),
+    setCoachLoading(false); // reset any stale loading state from previous session
+    if (coachMessages.length > 0) return;
+    const summary = buildCoachSummary();
+    const autoMsg = { id: nextMsgId(), role: "user", content: summary };
+    setCoachMessages([autoMsg]);
+    setCoachLoading(true);
+    const controller = new AbortController();
+    coachAbortRef.current = controller;
+    _fetchCoach([autoMsg], controller.signal)
+      .then((text) => setCoachMessages([autoMsg, { id: nextMsgId(), role: "assistant", content: text }]))
+      .catch((err) => {
+        if (err.name === "AbortError") return;
+        setCoachMessages([autoMsg, { id: nextMsgId(), role: "assistant", content: err.message, isError: true }]);
       })
-        .then((r) => r.json())
-        .then((data) => {
-          if (data.error) throw new Error(data.error);
-          setCoachMessages([autoMsg, { role: "assistant", content: data.text }]);
-        })
-        .catch((err) => {
-          setCoachMessages([autoMsg, { role: "assistant", content: `❌ ${err.message}` }]);
-        })
-        .finally(() => setCoachLoading(false));
-    }
-  };
+      .finally(() => setCoachLoading(false));
+  }, [coachMessages, buildCoachSummary, _fetchCoach]);
 
   const weekData = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(); d.setDate(d.getDate() - (6 - i));
@@ -476,35 +536,6 @@ export default function CalorieTracker() {
     const matchSearch = !search || f.name.toLowerCase().includes(search.toLowerCase());
     return matchCat && matchSearch;
   });
-
-  const CircularProgress = ({ value, max, size = 140, stroke = 10, color, label }) => {
-    const r = (size - stroke) / 2, c = 2 * Math.PI * r, off = c * (1 - Math.min(value / max, 1));
-    return (
-      <div style={{ position: "relative", width: size, height: size }}>
-        <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
-          <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={t.track} strokeWidth={stroke} />
-          <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={stroke}
-            strokeDasharray={c} strokeDashoffset={off} strokeLinecap="round" style={{ transition: "stroke-dashoffset 0.6s ease" }} />
-        </svg>
-        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-          <span style={{ fontSize: size > 100 ? 28 : 18, fontWeight: 800, color: t.text, fontFamily: "'Bebas Neue', sans-serif", letterSpacing: 1 }}>{value}</span>
-          <span style={{ fontSize: 10, color: t.textMuted, textTransform: "uppercase", letterSpacing: 1.5 }}>{label}</span>
-        </div>
-      </div>
-    );
-  };
-
-  const MacroBar = ({ label, value, max, color }) => (
-    <div style={{ marginBottom: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-        <span style={{ fontSize: 11, fontWeight: 600, color: t.textMuted, textTransform: "uppercase", letterSpacing: 1.5 }}>{label}</span>
-        <span style={{ fontSize: 12, fontWeight: 700, color }}>{value}g <span style={{ color: t.textFaint }}>/ {max}g</span></span>
-      </div>
-      <div style={{ height: 6, background: t.track, borderRadius: 3, overflow: "hidden" }}>
-        <div style={{ height: "100%", width: `${pct(value, max)}%`, background: color, borderRadius: 3, transition: "width 0.5s ease" }} />
-      </div>
-    </div>
-  );
 
   const navBtn = (active) => ({
     padding: "10px 18px", border: "none", borderRadius: 10,
@@ -562,7 +593,7 @@ export default function CalorieTracker() {
           <div>
             <div style={{ display: "flex", justifyContent: "center", padding: "20px 0 28px", position: "relative" }}>
               <div style={{ position: "relative" }}>
-                <CircularProgress value={totals.calories} max={goals.calories} size={180} stroke={12} color={t.accent} label="kcal" />
+                <CircularProgress value={totals.calories} max={goals.calories} size={180} stroke={12} color={t.accent} label="kcal" trackColor={t.track} textColor={t.text} mutedColor={t.textMuted} />
                 <div style={{ position: "absolute", bottom: -8, left: "50%", transform: "translateX(-50%)",
                   background: totals.calories >= goals.calories ? t.greenBg : t.track,
                   color: totals.calories >= goals.calories ? t.green : t.textMuted,
@@ -572,9 +603,9 @@ export default function CalorieTracker() {
               </div>
             </div>
             <div style={{ background: t.card, borderRadius: 16, padding: "20px 20px 10px", border: `1px solid ${t.cardBorder}`, marginBottom: 16 }}>
-              <MacroBar label="Bílkoviny" value={totals.protein} max={goals.protein} color={t.red} />
-              <MacroBar label="Sacharidy" value={totals.carbs} max={goals.carbs} color={t.accent} />
-              <MacroBar label="Tuky" value={totals.fat} max={goals.fat} color={t.blue} />
+              <MacroBar label="Bílkoviny" value={totals.protein} max={goals.protein} color={t.red} trackColor={t.track} mutedColor={t.textMuted} faintColor={t.textFaint} />
+              <MacroBar label="Sacharidy" value={totals.carbs} max={goals.carbs} color={t.accent} trackColor={t.track} mutedColor={t.textMuted} faintColor={t.textFaint} />
+              <MacroBar label="Tuky" value={totals.fat} max={goals.fat} color={t.blue} trackColor={t.track} mutedColor={t.textMuted} faintColor={t.textFaint} />
             </div>
             <div style={{ marginTop: 20 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -723,11 +754,11 @@ export default function CalorieTracker() {
                 </div>
               </div>
               <div style={{ display: "flex", gap: 6 }}>
-                <button onClick={() => { setCoachMessages([]); setCoachWater(""); }} style={{
+                <button onClick={() => { coachAbortRef.current?.abort(); setCoachMessages([]); setCoachWater(""); setCoachLoading(false); setCoachOpen(false); }} style={{
                   background: t.redBg, border: "none", borderRadius: 8, color: t.red,
                   padding: "4px 10px", fontSize: 9, fontWeight: 700, cursor: "pointer", letterSpacing: 1,
                 }}>RESET</button>
-                <button onClick={() => setCoachOpen(false)} style={{
+                <button onClick={() => { coachAbortRef.current?.abort(); setCoachOpen(false); }} style={{
                   background: "none", border: "none", color: t.textMuted, fontSize: 20,
                   cursor: "pointer", padding: "0 4px", lineHeight: 1,
                 }}>×</button>
@@ -765,14 +796,14 @@ export default function CalorieTracker() {
                 </div>
               )}
               {coachMessages.map((msg, i) => (
-                <div key={i} style={{
+                <div key={msg.id} style={{
                   alignSelf: msg.role === "user" ? "flex-end" : "flex-start",
                   maxWidth: "88%",
                   padding: "10px 14px",
                   borderRadius: msg.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
-                  background: msg.role === "user" ? t.accentBg : t.card,
-                  border: `1px solid ${msg.role === "user" ? t.accent + "33" : t.cardBorder}`,
-                  fontSize: 12, lineHeight: 1.6, color: t.textSec,
+                  background: msg.isError ? t.redBg : msg.role === "user" ? t.accentBg : t.card,
+                  border: `1px solid ${msg.isError ? t.red + "44" : msg.role === "user" ? t.accent + "33" : t.cardBorder}`,
+                  fontSize: 12, lineHeight: 1.6, color: msg.isError ? t.red : t.textSec,
                   whiteSpace: "pre-wrap", wordBreak: "break-word",
                 }}>
                   {msg.role === "user" && i === 0 ? "📊 Denní souhrn odeslán" : msg.content}
@@ -783,9 +814,10 @@ export default function CalorieTracker() {
                   alignSelf: "flex-start", padding: "10px 14px", borderRadius: "14px 14px 14px 4px",
                   background: t.card, border: `1px solid ${t.cardBorder}`, fontSize: 12, color: t.textMuted,
                 }}>
-                  <span style={{ animation: "pulse 1.5s ease-in-out infinite" }}>🤖 Analyzuji...</span>
+                  🤖 Analyzuji...
                 </div>
               )}
+              <div ref={coachBottomRef} />
             </div>
 
             {/* Input area */}
@@ -834,7 +866,7 @@ export default function CalorieTracker() {
         )}
 
         {/* COACH FLOATING BUTTON */}
-        <button onClick={() => { if (coachOpen) { setCoachOpen(false); } else { setCoachOpen(true); } }}
+        <button onClick={() => setCoachOpen(o => !o)}
           style={{
             position: "fixed", bottom: 20, right: 20, width: 56, height: 56, borderRadius: 28,
             background: t.accentGrad, border: "none", cursor: "pointer", fontSize: 24,
