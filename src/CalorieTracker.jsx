@@ -385,7 +385,11 @@ export default function CalorieTracker() {
   };
 
   const removeEntry = (id) => setEntries((prev) => prev.filter((e) => e.id !== id));
-  const resetDay = () => setEntries((prev) => prev.filter((e) => e.date !== selectedDate));
+  const resetDay = () => {
+    if (window.confirm(`Smazat všech ${todayEntries.length} jídel pro ${selectedDate}?`)) {
+      setEntries((prev) => prev.filter((e) => e.date !== selectedDate));
+    }
+  };
   const pct = (val, goal) => Math.min((val / goal) * 100, 100);
 
   const buildCoachSummary = () => {
@@ -591,7 +595,7 @@ export default function CalorieTracker() {
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     <span style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, color: t.accent, letterSpacing: 1 }}>{entry.cal}</span>
-                    <button onClick={() => removeEntry(entry.id)} style={{ background: "none", border: "none", color: t.textGhost, cursor: "pointer", fontSize: 16, padding: "2px 6px" }}>×</button>
+                    <button onClick={() => removeEntry(entry.id)} style={{ background: "none", border: "none", color: t.textGhost, cursor: "pointer", fontSize: 18, padding: 0, minWidth: 44, minHeight: 44, display: "flex", alignItems: "center", justifyContent: "center" }}>×</button>
                   </div>
                 </div>
               ))}

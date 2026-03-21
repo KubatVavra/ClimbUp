@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
 function localApiPlugin() {
+  const rateMap = new Map();
   return {
     name: 'local-api',
     configureServer(server) {
@@ -11,6 +12,17 @@ function localApiPlugin() {
           res.end(JSON.stringify({ error: 'Method not allowed' }));
           return;
         }
+        const ip = req.socket?.remoteAddress || 'local';
+        const now = Date.now();
+        const entry = rateMap.get(ip);
+        if (entry && now - entry.start < 60000 && entry.count >= 10) {
+          res.statusCode = 429;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: 'Příliš mnoho dotazů. Počkej minutu.' }));
+          return;
+        }
+        if (!entry || now - entry.start >= 60000) rateMap.set(ip, { start: now, count: 1 });
+        else entry.count++;
         let body = '';
         for await (const chunk of req) body += chunk;
         try {
